@@ -198,15 +198,16 @@ def process_outfit_with_gemini(items_with_urls: list[dict]) -> bytes | None:
         for part in response.candidates[0].content.parts:
             if part.inline_data:
                 data = part.inline_data.data
-                print(f"Type: {type(data)}")
-                print(f"First 100: {data[:100]}")
-
-                if isinstance(data, str):
+                if isinstance(data, bytes):
+                    # Vẫn là base64 dạng bytes string
+                    try:
+                        import base64
+                        data = base64.b64decode(data)
+                    except Exception:
+                        pass
+                elif isinstance(data, str):
                     import base64
                     data = base64.b64decode(data)
-
-                print(f"After decode type: {type(data)}, length: {len(data)}")
-                print(f"First bytes: {data[:20]}")
                 print(f"✅ Gemini (Vertex AI) generated outfit image ({gender})")
                 return data
 

@@ -39,7 +39,7 @@ def _get_image_url_for_wardrobe_item(wardrobe_item_id: str, db: Session) -> str 
     return None
 
 
-async def _build_outfit_images(outfits: list[dict], db: Session) -> list[bytes]:
+async def _build_outfit_images(outfits: list[dict], db: Session) -> list[bytes | None]:
     outfit_imgs = []
 
     for outfit in outfits:
@@ -54,8 +54,7 @@ async def _build_outfit_images(outfits: list[dict], db: Session) -> list[bytes]:
             })
 
         outfit_img = process_outfit_with_gemini(items_with_urls)
-        if outfit_img:
-            outfit_imgs.append(outfit_img)
+        outfit_imgs.append(outfit_img)  # append cả None để zip đúng thứ tự
 
     return outfit_imgs
 
@@ -84,12 +83,19 @@ async def generate_wardrobe_outfits_image(
     if not result["outfits"]:
         return {"error": result["message"], "outfit_image": None}
 
-    outfit_imgs = await _build_outfit_images(result["outfits"], db)
-    if not outfit_imgs:
+    outfit_imgs_raw = await _build_outfit_images(result["outfits"], db)
+
+    # Lọc None, giữ labels tương ứng
+    paired = [
+        (img, f"Bộ {o['outfit_number']}")
+        for img, o in zip(outfit_imgs_raw, result["outfits"])
+        if img
+    ]
+    if not paired:
         return {"error": "Không tạo được ảnh", "outfit_image": None}
 
-    labels    = [f"Bộ {o['outfit_number']}" for o in result["outfits"]]
-    final_img = compose_all_outfits(outfit_imgs, labels)
+    outfit_imgs, labels = zip(*paired)
+    final_img = compose_all_outfits(list(outfit_imgs), list(labels))
     final_b64 = base64.b64encode(final_img).decode()
 
     return {
@@ -133,12 +139,19 @@ async def generate_outfits_occasion_image(
     if not result["outfits"]:
         return {"error": result["message"], "outfit_image": None}
 
-    outfit_imgs = await _build_outfit_images(result["outfits"], db)
-    if not outfit_imgs:
+    outfit_imgs_raw = await _build_outfit_images(result["outfits"], db)
+
+    # Lọc None, giữ labels tương ứng
+    paired = [
+        (img, f"Bộ {o['outfit_number']}")
+        for img, o in zip(outfit_imgs_raw, result["outfits"])
+        if img
+    ]
+    if not paired:
         return {"error": "Không tạo được ảnh", "outfit_image": None}
 
-    labels    = [f"Bộ {o['outfit_number']}" for o in result["outfits"]]
-    final_img = compose_all_outfits(outfit_imgs, labels)
+    outfit_imgs, labels = zip(*paired)
+    final_img = compose_all_outfits(list(outfit_imgs), list(labels))
     final_b64 = base64.b64encode(final_img).decode()
 
     return {
