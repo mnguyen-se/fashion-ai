@@ -6,7 +6,7 @@ from google import genai
 from google.genai import types
 from google.oauth2 import service_account
 from app.core.config import settings
-
+import base64
 # ─────────────────────────────────────────
 # Configure Gemini qua Vertex AI (thay cho AI Studio / API key)
 # ─────────────────────────────────────────
@@ -198,7 +198,11 @@ def process_outfit_with_gemini(items_with_urls: list[dict]) -> bytes | None:
         for part in response.candidates[0].content.parts:
             if part.inline_data:
                 print(f"✅ Gemini (Vertex AI) generated outfit image ({gender})")
-                return part.inline_data.data
+                data = part.inline_data.data
+                # Decode nếu là base64 string
+                if isinstance(data, str):
+                    data = base64.b64decode(data)
+                return data
 
         print("Gemini không trả về ảnh")
         return None
