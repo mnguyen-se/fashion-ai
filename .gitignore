@@ -1,0 +1,12 @@
+# Python
+backend/venv/
+backend/__pycache__/
+backend/*.pyc
+backend/chroma_db/
+backend/credentials.json
+backend/.env
+backend/fashion_ai.db
+
+# General
+.DS_Store
+*.log
