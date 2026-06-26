@@ -20,20 +20,39 @@ from app.core.config import settings
 # trực tiếp file JSON ở đây và truyền explicit vào genai.Client(). Nếu path
 # sai, lỗi sẽ hiện rõ ngay khi khởi động app, thay vì lỗi mơ hồ "default
 # credentials were not found" lúc gọi API.
-CREDENTIALS_PATH = settings.google_application_credentials
+import tempfile
 
-if not CREDENTIALS_PATH or not os.path.isfile(CREDENTIALS_PATH):
-    raise RuntimeError(
-        f"Không tìm thấy file service account credentials tại: {CREDENTIALS_PATH!r}. "
-        f"Kiểm tra lại biến GOOGLE_APPLICATION_CREDENTIALS trong file .env — "
-        f"đường dẫn phải trỏ đúng tới file credentials.json đang tồn tại trên máy."
+credential_value = settings.google_application_credentials
+
+if not credential_value:
+    raise RuntimeError("GOOGLE_APPLICATION_CREDENTIALS chưa được thiết lập.")
+
+# Nếu biến môi trường chứa JSON (Railway)
+if credential_value.strip().startswith("{"):
+    temp = tempfile.NamedTemporaryFile(
+        mode="w",
+        suffix=".json",
+        delete=False,
+        encoding="utf-8",
     )
+    temp.write(credential_value)
+    temp.close()
+
+    credentials_path = temp.name
+
+# Nếu là đường dẫn file (Local)
+else:
+    credentials_path = credential_value
+
+    if not os.path.isfile(credentials_path):
+        raise RuntimeError(
+            f"Không tìm thấy credentials file: {credentials_path}"
+        )
 
 _vertex_credentials = service_account.Credentials.from_service_account_file(
-    CREDENTIALS_PATH,
+    credentials_path,
     scopes=["https://www.googleapis.com/auth/cloud-platform"],
 )
-
 client = genai.Client(
     vertexai=True,
     project=settings.google_cloud_project,
