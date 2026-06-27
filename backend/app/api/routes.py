@@ -3,13 +3,11 @@ from sqlalchemy.orm import Session
 from pydantic import BaseModel
 import base64
 import uuid
+import asyncio
 
 from app.db.database import get_db
 from app.services import outfit_service
-from app.services.image_service import (
-    process_outfit_with_gemini,
-    compose_all_outfits,
-)
+from app.services.image_service import process_outfit_with_gemini
 
 router = APIRouter()
 
@@ -39,10 +37,10 @@ def _get_image_url_for_wardrobe_item(wardrobe_item_id: str, db: Session) -> str 
     return None
 
 
-async def _build_outfit_images(outfits: list[dict], db: Session) -> list[bytes | None]:
-    outfit_imgs = []
+async def _build_outfit_images(outfits: list[dict], db: Session) -> list[dict]:
+    results = []
 
-    for outfit in outfits:
+    for i, outfit in enumerate(outfits):
         items_with_urls = []
 
         for item in outfit["items"]:
@@ -54,23 +52,25 @@ async def _build_outfit_images(outfits: list[dict], db: Session) -> list[bytes |
             })
 
         outfit_img = process_outfit_with_gemini(items_with_urls)
-        outfit_imgs.append(outfit_img)  # append cả None để zip đúng thứ tự
 
-    return outfit_imgs
+        if outfit_img:
+            results.append({
+                "outfit_number": outfit["outfit_number"],
+                "image_b64":     base64.b64encode(outfit_img).decode(),
+                "outfit":        outfit,
+            })
+
+        # Delay 15 giây giữa các bộ để tránh rate limit
+        if i < len(outfits) - 1:
+            print(f"Chờ 15s trước khi generate bộ tiếp theo...")
+            await asyncio.sleep(15)
+
+    return results
 
 
 # ─────────────────────────────────────────
-# 1. Phối đồ tự động (không theo dịp)
+# 1. Phối đồ tự động có ảnh
 # ─────────────────────────────────────────
-
-@router.get("/wardrobe/{user_id}/outfits")
-def generate_wardrobe_outfits(
-    user_id:     str,
-    max_outfits: int = 3,
-    db:          Session = Depends(get_db),
-):
-    return outfit_service.generate_outfits_from_wardrobe(user_id, db, max_outfits)
-
 
 @router.get("/wardrobe/{user_id}/outfits/image")
 async def generate_wardrobe_outfits_image(
@@ -81,48 +81,34 @@ async def generate_wardrobe_outfits_image(
     result = outfit_service.generate_outfits_from_wardrobe(user_id, db, max_outfits)
 
     if not result["outfits"]:
-        return {"error": result["message"], "outfit_image": None}
+        return {"error": result["message"], "outfits": []}
 
-    outfit_imgs_raw = await _build_outfit_images(result["outfits"], db)
+    outfit_results = await _build_outfit_images(result["outfits"], db)
 
-    # Lọc None, giữ labels tương ứng
-    paired = [
-        (img, f"Bộ {o['outfit_number']}")
-        for img, o in zip(outfit_imgs_raw, result["outfits"])
-        if img
-    ]
-    if not paired:
-        return {"error": "Không tạo được ảnh", "outfit_image": None}
-
-    outfit_imgs, labels = zip(*paired)
-    final_img = compose_all_outfits(list(outfit_imgs), list(labels))
-    final_b64 = base64.b64encode(final_img).decode()
+    if not outfit_results:
+        return {"error": "Không tạo được ảnh", "outfits": []}
 
     return {
-        "outfit_image": f"data:image/png;base64,{final_b64}",
-        "outfits":      result["outfits"],
-        "message":      result["message"],
+        "message": result["message"],
+        "outfits": [
+            {
+                "outfit_number": r["outfit_number"],
+                "image_b64":     f"data:image/png;base64,{r['image_b64']}",
+                "items":         r["outfit"]["items"],
+                "description":   r["outfit"]["description"],
+                "color_reason":  r["outfit"]["color_reason"],
+            }
+            for r in outfit_results
+        ],
     }
 
 
 # ─────────────────────────────────────────
-# 2. Phối đồ theo dịp
+# 2. Phối đồ theo dịp có ảnh
 # ─────────────────────────────────────────
 
 class OccasionRequest(BaseModel):
     message: str
-
-
-@router.post("/wardrobe/{user_id}/outfits/occasion")
-def generate_outfits_by_occasion(
-    user_id:     str,
-    body:        OccasionRequest,
-    max_outfits: int = 3,
-    db:          Session = Depends(get_db),
-):
-    return outfit_service.generate_outfits_by_occasion(
-        user_id, body.message, db, max_outfits
-    )
 
 
 @router.post("/wardrobe/{user_id}/outfits/occasion/image")
@@ -137,28 +123,26 @@ async def generate_outfits_occasion_image(
     )
 
     if not result["outfits"]:
-        return {"error": result["message"], "outfit_image": None}
+        return {"error": result["message"], "outfits": []}
 
-    outfit_imgs_raw = await _build_outfit_images(result["outfits"], db)
+    outfit_results = await _build_outfit_images(result["outfits"], db)
 
-    # Lọc None, giữ labels tương ứng
-    paired = [
-        (img, f"Bộ {o['outfit_number']}")
-        for img, o in zip(outfit_imgs_raw, result["outfits"])
-        if img
-    ]
-    if not paired:
-        return {"error": "Không tạo được ảnh", "outfit_image": None}
-
-    outfit_imgs, labels = zip(*paired)
-    final_img = compose_all_outfits(list(outfit_imgs), list(labels))
-    final_b64 = base64.b64encode(final_img).decode()
+    if not outfit_results:
+        return {"error": "Không tạo được ảnh", "outfits": []}
 
     return {
-        "outfit_image": f"data:image/png;base64,{final_b64}",
-        "outfits":      result["outfits"],
-        "message":      result["message"],
-        "occasion":     result.get("occasion", ""),
+        "message":  result["message"],
+        "occasion": result.get("occasion", ""),
+        "outfits": [
+            {
+                "outfit_number": r["outfit_number"],
+                "image_b64":     f"data:image/png;base64,{r['image_b64']}",
+                "items":         r["outfit"]["items"],
+                "description":   r["outfit"]["description"],
+                "color_reason":  r["outfit"]["color_reason"],
+            }
+            for r in outfit_results
+        ],
     }
 
 

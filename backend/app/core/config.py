@@ -13,6 +13,11 @@ class Settings(BaseSettings):
     CLIPDROP_API_KEY:  str = ""
     photoroom_api_key: Optional[str] = None
     GEMINI_API_KEY: str = ""
+
+    @property
+    def gemini_key_list(self) -> list[str]:
+        return [k.strip() for k in self.GEMINI_API_KEYS.split(",") if k.strip()]
+
     google_application_credentials: str | None = None
     google_cloud_location: str = "us-central1"
     google_cloud_project: str = ""          # ← THÊM DÒNG NÀY
