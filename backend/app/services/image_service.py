@@ -195,14 +195,20 @@ def process_outfit_with_gemini(items_with_urls: list[dict]) -> bytes | None:
         )
 
         # Lấy ảnh từ response
+        # Lấy ảnh từ response
         for part in response.candidates[0].content.parts:
             if part.inline_data:
                 data = part.inline_data.data
-                # Nếu là string base64 → decode thành bytes để trả về
-                if isinstance(data, str):
+                if isinstance(data, bytes):
+                    try:
+                        import base64
+                        data = base64.b64decode(data)
+                    except Exception:
+                        pass
+                elif isinstance(data, str):
+                    import base64
                     data = base64.b64decode(data)
-                # Nếu đã là bytes → dùng thẳng
-                print(f"✅ Gemini generated image, size={len(data)} bytes")
+                print(f"✅ Gemini (Vertex AI) generated outfit image ({gender})")
                 return data
 
         print("Gemini không trả về ảnh")
