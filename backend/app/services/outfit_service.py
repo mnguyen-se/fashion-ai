@@ -258,6 +258,9 @@ def _get_wardrobe_items(user_id: str, db: Session) -> list[CartItem]:
             category=category,
             occasions=occasions,
         ))
+        print(f"Total rows found: {len(rows)}")
+        for item in rows:
+            print(f"id={item.id}, category={item.category}, status={item.status}, user_id={item.user_id}")
     return result
 
 
