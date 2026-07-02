@@ -13,7 +13,6 @@ services:
       - GOOGLE_CLOUD_PROJECT=${GOOGLE_CLOUD_PROJECT}
       - GOOGLE_APPLICATION_CREDENTIALS=/app/credentials.json
       - SECRET_KEY=${SECRET_KEY}
-      - CLIPDROP_API_KEY=${CLIPDROP_API_KEY}
     command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
     extra_hosts:
       - "host.docker.internal:host-gateway"

@@ -59,46 +59,106 @@ def generate_outfits_by_occasion(
     db: Session,
     max_outfits: int = 3,
 ) -> dict:
-    """
-    Phối đồ từ wardrobe theo dịp user nhắn.
-
-    Ví dụ:
-      "lựa cho tôi bộ đi đám cưới"  → occasion=wedding
-      "muốn mặc đi làm ngày mai"    → occasion=office
-      "chọn đồ đi biển với"         → occasion=beach
-    """
     occasion_tags    = _parse_occasion_from_message(message)
     occasion_display = _occasion_display_name(message)
 
     all_items = _get_wardrobe_items(user_id, db)
     if not all_items:
-        return {"outfits": [], "message": "Tủ đồ trống!"}
+        return {"outfits": [], "message": "Tủ đồ của bạn hiện đang trống!"}
 
     groups = _group_by_category(all_items)
     valid, msg = _check_groups(groups)
     if not valid:
-        return {"outfits": [], "message": msg, "wardrobe_summary": {k: len(v) for k, v in groups.items()}}
+        return {
+            "outfits": [],
+            "message": msg,
+            "wardrobe_summary": {k: len(v) for k, v in groups.items()}
+        }
 
-    scored = _score_all_combinations(groups, occasion_filter=occasion_tags)
-    best   = _pick_diverse(scored, max_outfits)
+    # Kiểm tra xem có ít nhất 1 áo VÀ 1 quần phù hợp occasion không
+    tops_matched    = [i for i in groups["top"]    if any(t in i.occasions for t in occasion_tags)]
+    bottoms_matched = [i for i in groups["bottom"] if any(t in i.occasions for t in occasion_tags)]
 
-    # Fallback nếu không tìm được bộ nào phù hợp occasion
-    if not best:
-        scored = _score_all_combinations(groups, occasion_filter=None)
-        best   = _pick_diverse(scored, max_outfits)
-        note   = f" (Không có đồ phù hợp {occasion_display}, gợi ý bộ đẹp nhất hiện có)"
-    else:
-        note = ""
+    has_occasion_match = len(tops_matched) > 0 and len(bottoms_matched) > 0
 
+    if not has_occasion_match:
+        # Tìm trong catalog
+        catalog_suggestions = _get_catalog_suggestions(occasion_tags, db, limit=6)
+
+        if catalog_suggestions:
+            return {
+                "message": f"Trong tủ đồ của bạn hiện không có trang phục phù hợp để {occasion_display}. Bạn có thể tham khảo các sản phẩm sau từ cửa hàng:",
+                "occasion": occasion_display,
+                "occasion_tags": occasion_tags,
+                "wardrobe_suggestion": False,
+                "outfits": [],
+                "catalog_suggestions": catalog_suggestions,
+                "wardrobe_summary": {k: len(v) for k, v in groups.items()},
+            }
+        else:
+            return {
+                "message": f"Trong tủ đồ của bạn hiện không có trang phục phù hợp để {occasion_display} và cửa hàng cũng chưa có sản phẩm phù hợp.",
+                "occasion": occasion_display,
+                "occasion_tags": occasion_tags,
+                "wardrobe_suggestion": False,
+                "outfits": [],
+                "catalog_suggestions": [],
+                "wardrobe_summary": {k: len(v) for k, v in groups.items()},
+            }
+
+    # Có đồ phù hợp → phối từ tủ
+    scored  = _score_all_combinations(groups, occasion_filter=occasion_tags)
+    best    = _pick_diverse(scored, max_outfits)
     outfits = _format_outfits(best)
 
     return {
-        "message":       f"Gợi ý {len(outfits)} bộ để {occasion_display}{note}.",
-        "occasion":      occasion_display,
-        "occasion_tags": occasion_tags,
-        "wardrobe_summary": {k: len(v) for k, v in groups.items()},
-        "outfits": outfits,
+        "message":             f"Gợi ý {len(outfits)} bộ để {occasion_display}.",
+        "occasion":            occasion_display,
+        "occasion_tags":       occasion_tags,
+        "wardrobe_suggestion": True,
+        "outfits":             outfits,
+        "catalog_suggestions": [],
+        "wardrobe_summary":    {k: len(v) for k, v in groups.items()},
     }
+def _get_catalog_suggestions(occasion_tags: list[str], db: Session, limit: int = 6) -> list[dict]:
+    from app.models.product import Product
+
+    products = db.query(Product).filter(
+        Product.status == "AVAILABLE",
+    ).all()
+
+    # Filter theo occasion tags
+    matched = []
+    for product in products:
+        tags = product.ai_tags or []
+        if any(tag in tags for tag in occasion_tags):
+            matched.append(product)
+
+    if not matched:
+        return []
+
+    # Phân nhóm theo category, lấy 2 mỗi loại
+    groups = {"top": [], "bottom": [], "shoes": [], "accessory": []}
+    for p in matched:
+        cat = (p.category or "top").lower()
+        if cat in groups and len(groups[cat]) < 2:
+            groups[cat].append(p)
+
+    # Gộp lại
+    result = []
+    for items in groups.values():
+        result.extend(items)
+
+    # Nếu không đủ thì fill thêm từ matched
+    if len(result) < limit:
+        existing_ids = {p.id for p in result}
+        for p in matched:
+            if p.id not in existing_ids:
+                result.append(p)
+            if len(result) >= limit:
+                break
+
+    return [p.to_dict() for p in result[:limit]]
 
 
 # ═════════════════════════════════════════════════════

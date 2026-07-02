@@ -1,16 +1,14 @@
 """
-AI service dùng Gemini (thay Ollama).
+AI service dùng Ollama (local LLM).
 Làm 2 việc:
-1. Parse intent từ câu hỏi user
+1. Parse intent từ câu hỏi của user
 2. Generate câu trả lời tự nhiên
 """
 import json
 import re
-from google import genai
+import ollama
 from app.core.config import settings
 from app.models.schemas import ParsedIntent, CartItem
-
-client = genai.Client(api_key=settings.GEMINI_API_KEY)
 
 NLU_SYSTEM_PROMPT = """Bạn là AI phân tích yêu cầu phối đồ thời trang.
 Nhiệm vụ: Phân tích câu hỏi của user và trả về JSON.
@@ -46,19 +44,21 @@ async def parse_intent(
         for i, item in enumerate(cart_items)
     ])
 
-    prompt = f"""{NLU_SYSTEM_PROMPT}
-
-Giỏ hàng hiện tại:
+    user_content = f"""Giỏ hàng hiện tại:
 {cart_summary}
 
 Câu hỏi: {user_message}"""
 
-    response = client.models.generate_content(
-        model="gemini-2.0-flash",
-        contents=prompt,
+    response = ollama.chat(
+        model=settings.OLLAMA_MODEL,
+        messages=[
+            {"role": "system", "content": NLU_SYSTEM_PROMPT},
+            {"role": "user",   "content": user_content},
+        ],
+        options={"temperature": 0.1}
     )
 
-    raw = response.text.strip()
+    raw = response["message"]["content"].strip()
 
     try:
         data = json.loads(raw)
@@ -109,16 +109,21 @@ Dịp: {occasion}
 Gợi ý phối: {suggestions_str}
 Câu hỏi gốc: {user_message}"""
 
-    prompt = f"{RESPONSE_SYSTEM_PROMPT}\n\n{context}"
-
-    response = client.models.generate_content(
-        model="gemini-2.0-flash",
-        contents=prompt,
+    response = ollama.chat(
+        model=settings.OLLAMA_MODEL,
+        messages=[
+            {"role": "system", "content": RESPONSE_SYSTEM_PROMPT},
+            {"role": "user",   "content": context},
+        ],
+        options={"temperature": 0.7}
     )
 
-    return response.text.strip()
+    return response["message"]["content"].strip()
 
 
 def check_ollama_connection() -> bool:
-    """Giữ lại để không lỗi import — luôn trả True vì dùng Gemini."""
-    return True
+    try:
+        ollama.list()
+        return True
+    except Exception:
+        return False

@@ -10,7 +10,8 @@ class Settings(BaseSettings):
     SECRET_KEY:        str = "your-secret-key-here"
     CLIPDROP_API_KEY:  str = ""
     photoroom_api_key: Optional[str] = None
-    GEMINI_API_KEY: str = ""
+    OLLAMA_BASE_URL: str = "http://localhost:11434"
+    OLLAMA_MODEL: str = "llama3.1"
 
     @property
     def gemini_key_list(self) -> list[str]:
