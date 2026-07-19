@@ -300,6 +300,8 @@ def _get_wardrobe_items(user_id: str, db: Session) -> list[CartItem]:
         WardrobeItem.status.in_(ACTIVE_WARDROBE_STATUSES),
     ).all()
 
+    print(f"Total rows found: {len(rows)}")
+
     result = []
     for item in rows:
         product = None
@@ -307,9 +309,11 @@ def _get_wardrobe_items(user_id: str, db: Session) -> list[CartItem]:
             product = db.query(Product).filter(Product.id == item.product_id).first()
 
         color     = normalize_color((product.color if product and product.color else None) or "black")
-        category  = item.category or (product.category if product else None) or "top"
+        category  = item.category_name or (product.category if product else None) or "top"
         name      = item.name or (product.title if product else "Không tên")
         occasions = (product.ai_tags if product and product.ai_tags else [])
+
+        print(f"id={item.id}, category={category}, status={item.status}, user_id={item.user_id}")
 
         result.append(CartItem(
             product_id=str(item.id),
@@ -318,9 +322,6 @@ def _get_wardrobe_items(user_id: str, db: Session) -> list[CartItem]:
             category=category,
             occasions=occasions,
         ))
-        print(f"Total rows found: {len(rows)}")
-        for item in rows:
-            print(f"id={item.id}, category={item.category}, status={item.status}, user_id={item.user_id}")
     return result
 
 
