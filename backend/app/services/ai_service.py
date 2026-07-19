@@ -9,6 +9,7 @@ import re
 import ollama
 from app.core.config import settings
 from app.models.schemas import ParsedIntent, CartItem
+import re
 
 NLU_SYSTEM_PROMPT = """Bạn là AI phân tích yêu cầu phối đồ thời trang.
 Nhiệm vụ: Phân tích câu hỏi của user và trả về JSON.
@@ -33,6 +34,12 @@ ref_product_index: index sản phẩm trong giỏ user đang hỏi (0-based), nu
 RESPONSE_SYSTEM_PROMPT = """Bạn là stylist thời trang của một shop quần áo.
 Nhiệm vụ: Dựa vào thông tin được cung cấp, viết 1-2 câu gợi ý phối đồ ngắn gọn, tự nhiên, thân thiện bằng tiếng Việt.
 Đề cập tên sản phẩm cụ thể. Không liệt kê danh sách, chỉ viết 1-2 câu mượt mà."""
+
+COLOR_REASON_SYSTEM_PROMPT = """Bạn là stylist thời trang.
+Nhiệm vụ: viết ĐÚNG 1 câu ngắn gọn (tối đa 20 từ), tự nhiên, thân thiện, CHỈ bằng tiếng Việt.
+TUYỆT ĐỐI KHÔNG dùng tiếng Anh, tiếng Trung hay bất kỳ ngôn ngữ nào khác xen vào câu.
+Giải thích tại sao các món đồ trong outfit phối màu/phối hợp với nhau.
+Chỉ trả về 1 câu duy nhất. Không markdown, không liệt kê, không giải thích thêm."""
 
 
 async def parse_intent(
@@ -120,6 +127,68 @@ Câu hỏi gốc: {user_message}"""
 
     return response["message"]["content"].strip()
 
+async def generate_color_reason(items: list[dict], occasion: str | None = None) -> str:
+    """
+    items: list các dict {"name": str, "color": str, "category": str}
+    Trả về 1 câu giải thích lý do phối đồ, do AI sinh ra.
+    Nếu Ollama lỗi/timeout -> fallback về câu rule-based (không để trống).
+    """
+    if not items:
+        return ""
+    occasion_line = f"Dịp mặc: {occasion}. " if occasion else ""
+
+    if len(items) == 1:
+        if items[0].get("category") == "dress":
+            context = (
+                f"Outfit chỉ có 1 chiếc đầm: {items[0]['name']} màu {items[0]['color']}. "
+                f"Giải thích ngắn gọn tại sao 1 chiếc đầm là đã đủ tạo nên outfit hoàn chỉnh."
+            )
+        else:
+            return ""
+    else:
+        items_desc = ", ".join(f"{i['name']} (màu {i['color']})" for i in items)
+        context = f"Các món đồ trong outfit: {items_desc}. Giải thích ngắn gọn tại sao các màu này phối hợp tốt với nhau."
+
+    try:
+        response = ollama.chat(
+            model=settings.OLLAMA_MODEL,
+            messages=[
+                {"role": "system", "content": COLOR_REASON_SYSTEM_PROMPT},
+                {"role": "user", "content": context},
+            ],
+            options={"temperature": 0.4},
+        )
+        text = response["message"]["content"].strip()
+        if not text or _contains_cjk(text):
+            return _fallback_color_reason(items)
+        return text
+        return text if text else _fallback_color_reason(items)
+    except Exception as e:
+        print(f"[generate_color_reason] Ollama lỗi: {e}")
+        return _fallback_color_reason(items)
+
+
+def _fallback_color_reason(items: list[dict]) -> str:
+    """Fallback rule-based khi Ollama lỗi — không để color_reason trống."""
+    from app.core.color_rules import normalize_color
+
+    NEUTRALS = {"black", "white", "gray", "beige", "navy", "cream", "camel"}
+    if len(items) < 2:
+        if items and items[0].get("category") == "dress":
+            return "Một chiếc đầm là đã đủ tạo nên một outfit hoàn chỉnh."
+        return ""
+    c1 = normalize_color(items[0]["color"])
+    c2 = normalize_color(items[1]["color"])
+    if c1 in NEUTRALS and c2 in NEUTRALS:
+        return f"Cả {c1} và {c2} đều là màu trung tính — bộ đôi kinh điển."
+    if c1 in NEUTRALS:
+        return f"Màu {c1} trung tính dễ phối với {c2}."
+    if c2 in NEUTRALS:
+        return f"Màu {c2} trung tính làm dịu màu {c1} nổi bật."
+    return f"Màu {c1} và {c2} phối hợp hài hòa."
+
+def _contains_cjk(text: str) -> bool:
+    return bool(re.search(r'[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]', text))
 
 def check_ollama_connection() -> bool:
     try:
@@ -127,3 +196,6 @@ def check_ollama_connection() -> bool:
         return True
     except Exception:
         return False
+
+
+

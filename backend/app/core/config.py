@@ -11,7 +11,7 @@ class Settings(BaseSettings):
     CLIPDROP_API_KEY:  str = ""
     photoroom_api_key: Optional[str] = None
     OLLAMA_BASE_URL: str = "http://localhost:11434"
-    OLLAMA_MODEL: str = "llama3.1"
+    OLLAMA_MODEL: str = "qwen2.5:3b"
 
     @property
     def gemini_key_list(self) -> list[str]:

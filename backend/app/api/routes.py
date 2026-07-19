@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 
@@ -8,47 +8,21 @@ from app.services import outfit_service
 router = APIRouter()
 
 
-# ─────────────────────────────────────────
-# 1. Phối đồ tự động
-# ─────────────────────────────────────────
-
-@router.get("/wardrobe/{user_id}/outfits")
-def generate_wardrobe_outfits(
-    user_id:     str,
-    max_outfits: int = 3,
-    db:          Session = Depends(get_db),
-):
-    return outfit_service.generate_outfits_from_wardrobe(user_id, db, max_outfits)
-
-
-# ─────────────────────────────────────────
-# 2. Phối đồ theo dịp
-# ─────────────────────────────────────────
-
-class OccasionRequest(BaseModel):
+class GenerateOutfitsRequest(BaseModel):
     message: str
 
 
-@router.post("/wardrobe/{user_id}/outfits/occasion")
-def generate_outfits_by_occasion(
-    user_id:     str,
-    body:        OccasionRequest,
-    max_outfits: int = 3,
+@router.post("/wardrobe/{user_id}/outfits")
+async def generate_outfits(
+    user_id:     str,   # giữ lại để tương thích route Java, hiện chưa dùng tới trong logic
+    body:        GenerateOutfitsRequest,
+    max_outfits: int = Query(default=3),
     db:          Session = Depends(get_db),
 ):
-    return outfit_service.generate_outfits_by_occasion(
-        user_id, body.message, db, max_outfits
-    )
+    return await outfit_service.generate_outfits(db, body.message, max_outfits)
 
-
-# ─────────────────────────────────────────
-# HEALTH CHECK
-# ─────────────────────────────────────────
 
 @router.get("/health")
 def health_check():
     from app.services.ai_service import check_ollama_connection
-    return {
-        "status": "ok",
-        "ollama": "connected" if check_ollama_connection() else "disconnected ⚠️",
-    }
+    return {"status": "ok", "ollama": "connected" if check_ollama_connection() else "disconnected ⚠️"}

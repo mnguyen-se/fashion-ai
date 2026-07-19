@@ -40,7 +40,9 @@ class ChatResponse(BaseModel):
 # --- Intent (internal) ---
 
 class ParsedIntent(BaseModel):
-    occasion:       str
-    category_want:  str
-    style_hint:     Optional[str] = None
-    ref_product_id: Optional[str] = None
+    occasion: str = "casual"
+    category_want: str = "full_outfit"
+    style_hint: str | None = None
+    ref_product_id: str | None = None
+    min_price: int | None = None
+    max_price: int | None = None

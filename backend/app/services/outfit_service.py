@@ -1,224 +1,235 @@
 """
-Outfit service — phối đồ từ wardrobe của user.
+Outfit service — AI gợi ý phối đồ dựa trên message của user.
 
-2 tính năng:
-1. generate_outfits_from_wardrobe() — tự động phối 3 bộ đẹp nhất
-2. generate_outfits_by_occasion()   — phối theo dịp user nhắn
+CHỈ 1 API DUY NHẤT:
+  generate_outfits(db, message, max_outfits=3)
 
-Không dùng catalog, ChromaDB, embedding.
-Chỉ dùng COLOR_RULES + occasion tags.
+Flow:
+  message → ai_service.parse_intent() → occasion, category_want, style_hint, min_price, max_price
+  → category_want cụ thể (top/bottom/dress/accessory) → trả N sản phẩm đơn lẻ đúng slot đó
+  → category_want = full_outfit (hoặc không rõ) → tổ hợp top+bottom / dress + outer/accessory,
+    chấm điểm phối màu theo COLOR_RULES + occasion tag + giá.
+
+Không dùng ChromaDB, embedding. Chỉ dùng COLOR_RULES + occasion tags + parse_intent (Ollama NLU).
 """
+from sqlalchemy import func
 from sqlalchemy.orm import Session
+from app.services import ai_service
+import asyncio
 
-from app.models.product import Product, WardrobeItem
+from app.models.product import Product, Category
 from app.models.schemas import CartItem
 from app.core.color_rules import get_compatible_colors, normalize_color
-from app.core.occasion_rules import get_occasion_tags, OCCASION_MAP
 
-ACTIVE_WARDROBE_STATUSES = ["OWNED"]
+CATALOG_STATUS = "AVAILABLE"
+CANDIDATE_LIMIT = 12
 NEUTRALS = {"black", "white", "gray", "beige", "navy", "cream", "camel"}
 
+SLOT_CATEGORY_NAMES = {
+    "top": ["top", "áo thun"],
+    "bottom": ["bottom"],
+    "dress": ["dresses"],
+    "outer": ["blazers"],
+    "accessory": ["bag"],
+}
+
+ALL_SLOTS = ["top", "bottom", "dress", "outer", "accessory"]
+
+OCCASION_DISPLAY = {
+    "wedding": "đám cưới", "office": "đi làm", "beach": "đi biển",
+    "party": "tiệc", "date": "hẹn hò", "sport": "thể thao",
+    "outdoor": "dã ngoại", "formal": "trang trọng", "casual": "dạo phố",
+}
+
 
 # ═════════════════════════════════════════════════════
-# PUBLIC — 2 hàm chính
+# PUBLIC — 1 API duy nhất
 # ═════════════════════════════════════════════════════
 
-def generate_outfits_from_wardrobe(
-    user_id: str,
+async def generate_outfits(
     db: Session,
+    message: str,
     max_outfits: int = 3,
 ) -> dict:
-    """
-    Tự động phối đồ từ wardrobe — không lọc theo dịp.
-    Ví dụ: 3 áo (xanh/đỏ/đen) + 3 quần (xanh/đỏ/trắng)
-    → chọn 3 bộ đẹp nhất theo màu sắc.
-    """
-    all_items = _get_wardrobe_items(user_id, db)
-    if not all_items:
-        return {"outfits": [], "message": "Tủ đồ trống!"}
+    if not message or not message.strip():
+        return {"outfits": [], "message": "Vui lòng nhập yêu cầu, ví dụ: 'gợi ý đồ đi biển' hoặc 'áo sơ mi công sở dưới 300k'."}
 
-    groups = _group_by_category(all_items)
-    valid, msg = _check_groups(groups)
-    if not valid:
-        return {"outfits": [], "message": msg, "wardrobe_summary": {k: len(v) for k, v in groups.items()}}
+    intent = await ai_service.parse_intent(message, cart_items=[])
 
-    scored  = _score_all_combinations(groups, occasion_filter=None)
-    best    = _pick_diverse(scored, max_outfits)
-    outfits = _format_outfits(best)
+    occasion_tags = [intent.occasion] if intent.occasion else ["casual"]
+    occasion_display = OCCASION_DISPLAY.get(intent.occasion, "dịp thường ngày")
+
+    if intent.category_want == "shoes":
+        return {"outfits": [], "message": "Xin lỗi, shop hiện chưa hỗ trợ gợi ý giày. Bạn thử hỏi về áo/quần/đầm/blazer/túi nhé."}
+
+    if intent.category_want in ("top", "bottom", "dress", "accessory"):
+        outfits = await _single_slot_outfits(
+            intent.category_want, occasion_tags, intent.style_hint,
+            intent.min_price, intent.max_price, occasion_display, db, max_outfits,
+        )
+    else:
+        outfits = await _combo_outfits(
+            occasion_tags, occasion_display, intent.style_hint, intent.min_price, intent.max_price, db, max_outfits,
+        )
+
+    if not outfits:
+        return {
+            "outfits": [],
+            "message": f"Không tìm thấy sản phẩm phù hợp cho '{message}'. Bạn thử mô tả khác hoặc nới ngân sách xem sao.",
+            "occasion": occasion_display,
+            "occasion_tags": occasion_tags,
+        }
 
     return {
-        "message": f"Tìm được {len(outfits)} bộ phù hợp nhất từ {len(all_items)} món đồ.",
-        "wardrobe_summary": {k: len(v) for k, v in groups.items()},
+        "message": f"Gợi ý {len(outfits)} bộ để {occasion_display} theo yêu cầu của bạn.",
+        "occasion": occasion_display,
+        "occasion_tags": occasion_tags,
         "outfits": outfits,
     }
 
 
-def generate_outfits_by_occasion(
-    user_id: str,
-    message: str,
+# ═════════════════════════════════════════════════════
+# PATH 1: category cụ thể (top/bottom/dress/accessory)
+# ═════════════════════════════════════════════════════
+
+async def _single_slot_outfits(
+    slot: str,
+    occasion_tags: list[str],
+    style_hint: str | None,
+    min_price: int | None,
+    max_price: int | None,
+    occasion_display: str,
     db: Session,
-    max_outfits: int = 3,
-) -> dict:
-    occasion_tags    = _parse_occasion_from_message(message)
-    occasion_display = _occasion_display_name(message)
+    max_outfits: int,
+) -> list[dict]:
+    candidates = _get_catalog_candidates(slot, occasion_tags, db, set(), CANDIDATE_LIMIT, min_price, max_price)
+    if style_hint:
+        candidates = _rank_by_style(candidates, style_hint) or candidates
+    picked = candidates[:max_outfits]
 
-    all_items = _get_wardrobe_items(user_id, db)
-    if not all_items:
-        return {"outfits": [], "message": "Tủ đồ của bạn hiện đang trống!"}
-
-    groups = _group_by_category(all_items)
-    valid, msg = _check_groups(groups)
-    if not valid:
-        return {
-            "outfits": [],
-            "message": msg,
-            "wardrobe_summary": {k: len(v) for k, v in groups.items()}
-        }
-
-    # Kiểm tra xem có ít nhất 1 áo VÀ 1 quần phù hợp occasion không
-    tops_matched    = [i for i in groups["top"]    if any(t in i.occasions for t in occasion_tags)]
-    bottoms_matched = [i for i in groups["bottom"] if any(t in i.occasions for t in occasion_tags)]
-
-    has_occasion_match = len(tops_matched) > 0 and len(bottoms_matched) > 0
-
-    if not has_occasion_match:
-        # Tìm trong catalog
-        catalog_suggestions = _get_catalog_suggestions(occasion_tags, db, limit=6)
-
-        if catalog_suggestions:
-            return {
-                "message": f"Trong tủ đồ của bạn hiện không có trang phục phù hợp để {occasion_display}. Bạn có thể tham khảo các sản phẩm sau từ cửa hàng:",
-                "occasion": occasion_display,
-                "occasion_tags": occasion_tags,
-                "wardrobe_suggestion": False,
-                "outfits": [],
-                "catalog_suggestions": catalog_suggestions,
-                "wardrobe_summary": {k: len(v) for k, v in groups.items()},
-            }
-        else:
-            return {
-                "message": f"Trong tủ đồ của bạn hiện không có trang phục phù hợp để {occasion_display} và cửa hàng cũng chưa có sản phẩm phù hợp.",
-                "occasion": occasion_display,
-                "occasion_tags": occasion_tags,
-                "wardrobe_suggestion": False,
-                "outfits": [],
-                "catalog_suggestions": [],
-                "wardrobe_summary": {k: len(v) for k, v in groups.items()},
-            }
-
-    # Có đồ phù hợp → phối từ tủ
-    scored  = _score_all_combinations(groups, occasion_filter=occasion_tags)
-    best    = _pick_diverse(scored, max_outfits)
-    outfits = _format_outfits(best)
-
-    return {
-        "message":             f"Gợi ý {len(outfits)} bộ để {occasion_display}.",
-        "occasion":            occasion_display,
-        "occasion_tags":       occasion_tags,
-        "wardrobe_suggestion": True,
-        "outfits":             outfits,
-        "catalog_suggestions": [],
-        "wardrobe_summary":    {k: len(v) for k, v in groups.items()},
-    }
-def _get_catalog_suggestions(occasion_tags: list[str], db: Session, limit: int = 6) -> list[dict]:
-    from app.models.product import Product
-
-    products = db.query(Product).filter(
-        Product.status == "AVAILABLE",
-    ).all()
-
-    # Filter theo occasion tags
-    matched = []
-    for product in products:
-        tags = product.ai_tags or []
-        if any(tag in tags for tag in occasion_tags):
-            matched.append(product)
-
-    if not matched:
-        return []
-
-    # Phân nhóm theo category, lấy 2 mỗi loại
-    groups = {"top": [], "bottom": [], "shoes": [], "accessory": []}
-    for p in matched:
-        cat = (p.category or "top").lower()
-        if cat in groups and len(groups[cat]) < 2:
-            groups[cat].append(p)
-
-    # Gộp lại
-    result = []
-    for items in groups.values():
-        result.extend(items)
-
-    # Nếu không đủ thì fill thêm từ matched
-    if len(result) < limit:
-        existing_ids = {p.id for p in result}
-        for p in matched:
-            if p.id not in existing_ids:
-                result.append(p)
-            if len(result) >= limit:
-                break
-
-    return [p.to_dict() for p in result[:limit]]
+    outfits = []
+    for i, item in enumerate(picked):
+        items_info = [_item_info(item, selected=False)]
+        color_reason = await ai_service.generate_color_reason(items_info, occasion_display)
+        outfits.append({
+            "outfit_number": i + 1,
+            "score": None,
+            "items": items_info,
+            "description": _describe(items_info),
+            "color_reason": color_reason,
+        })
+    return outfits
 
 
 # ═════════════════════════════════════════════════════
-# CORE LOGIC
+# PATH 2: full_outfit — tổ hợp top+bottom / dress + outer/accessory
+# ═════════════════════════════════════════════════════
+
+async def _combo_outfits(
+    occasion_tags: list[str],
+    occasion_display: str,
+    style_hint: str | None,
+    min_price: int | None,
+    max_price: int | None,
+    db: Session,
+    max_outfits: int,
+) -> list[dict]:
+    groups = {
+        "top":       _get_catalog_candidates("top", occasion_tags, db, set(), CANDIDATE_LIMIT, min_price, max_price),
+        "bottom":    _get_catalog_candidates("bottom", occasion_tags, db, set(), CANDIDATE_LIMIT, min_price, max_price),
+        "dress":     _get_catalog_candidates("dress", occasion_tags, db, set(), CANDIDATE_LIMIT, min_price, max_price),
+        "outer":     _get_catalog_candidates("outer", occasion_tags, db, set(), CANDIDATE_LIMIT, min_price, max_price),
+        "accessory": _get_catalog_candidates("accessory", occasion_tags, db, set(), CANDIDATE_LIMIT, min_price, max_price),
+    }
+
+    scored = _score_all_combinations(groups, occasion_filter=occasion_tags)
+    best = _pick_diverse(scored, max_outfits)
+    return await _format_outfits(best, occasion_display)
+
+
+def _get_catalog_candidates(
+    slot: str,
+    occasion_tags: list[str] | None,
+    db: Session,
+    exclude_ids: set[str],
+    limit: int,
+    min_price: int | None = None,
+    max_price: int | None = None,
+) -> list[CartItem]:
+    names = SLOT_CATEGORY_NAMES[slot]
+
+    query = db.query(Product).filter(
+        Product.status == CATALOG_STATUS,
+        Product.category_ref.has(func.lower(Category.name).in_(names)),
+    )
+    if min_price is not None:
+        query = query.filter(Product.price >= min_price)
+    if max_price is not None:
+        query = query.filter(Product.price <= max_price)
+
+    products = [p for p in query.all() if str(p.id) not in exclude_ids]
+
+    if occasion_tags:
+        matched = [p for p in products if any(t in (p.ai_tags or []) for t in occasion_tags)]
+        pool = matched if matched else products
+    else:
+        pool = products
+
+    return [
+        CartItem(
+            product_id=str(p.id),
+            product_name=p.title or "Không tên",
+            color=normalize_color(p.color or "black"),
+            category=slot,
+            occasions=p.ai_tags or [],
+        )
+        for p in pool[:limit]
+    ]
+
+
+def _rank_by_style(candidates: list[CartItem], style_hint: str) -> list[CartItem]:
+    hint = style_hint.lower().strip()
+    matched = [c for c in candidates if hint in c.product_name.lower()]
+    rest = [c for c in candidates if c not in matched]
+    return matched + rest
+
+
+# ═════════════════════════════════════════════════════
+# CORE LOGIC — chấm điểm tổ hợp (giữ nguyên từ bản trước)
 # ═════════════════════════════════════════════════════
 
 def _score_all_combinations(groups: dict, occasion_filter: list[str] | None) -> list:
-    """Tính điểm tất cả tổ hợp top + bottom (+ shoes + accessory)."""
-    tops      = groups["top"]
-    bottoms   = groups["bottom"]
-    shoes     = groups["shoes"]
-    accessory = groups["accessory"]
-
+    tops, bottoms, dresses = groups["top"], groups["bottom"], groups["dress"]
+    outers, accessories = groups["outer"], groups["accessory"]
     scored = []
+
     for top in tops:
         for bottom in bottoms:
-            score  = _score_color_pair(top.color, bottom.color)
-
+            score = _score_color_pair(top.color, bottom.color)
             if occasion_filter:
                 score += _occasion_bonus(top, occasion_filter)
                 score += _occasion_bonus(bottom, occasion_filter)
-
-            outfit = {"items": [top, bottom], "score": score}
-
-            if shoes:
-                best_shoe = _best_match_item(top, bottom, shoes, occasion_filter)
-                if best_shoe:
-                    outfit["items"].append(best_shoe)
-                    outfit["score"] += _score_color_pair(top.color, best_shoe.color) * 0.3
-                    if occasion_filter:
-                        outfit["score"] += _occasion_bonus(best_shoe, occasion_filter) * 0.3
-
-            if accessory:
-                best_acc = _best_match_item(top, bottom, accessory, occasion_filter)
-                if best_acc:
-                    outfit["items"].append(best_acc)
-                    outfit["score"] += _score_color_pair(top.color, best_acc.color) * 0.2
-                    if occasion_filter:
-                        outfit["score"] += _occasion_bonus(best_acc, occasion_filter) * 0.2
-
+            outfit = {"items": [top, bottom], "score": score, "base_ids": (top.product_id, bottom.product_id)}
+            _attach_optional(outfit, [top, bottom], outers, occasion_filter, weight=0.3)
+            _attach_optional(outfit, [top, bottom], accessories, occasion_filter, weight=0.2)
             scored.append(outfit)
+
+    for dress in dresses:
+        score = 1.0
+        if occasion_filter:
+            score += _occasion_bonus(dress, occasion_filter)
+        outfit = {"items": [dress], "score": score, "base_ids": (dress.product_id,)}
+        _attach_optional(outfit, [dress], outers, occasion_filter, weight=0.3)
+        _attach_optional(outfit, [dress], accessories, occasion_filter, weight=0.2)
+        scored.append(outfit)
 
     return scored
 
 
 def _score_color_pair(color1: str, color2: str) -> float:
-    """
-    Điểm phối màu:
-      Cả 2 neutral  → 1.2
-      1 neutral      → 1.0
-      Tone-on-tone   → 0.6
-      Phối được      → 0.8
-      Không phối     → 0.1
-    """
-    c1 = normalize_color(color1)
-    c2 = normalize_color(color2)
-
+    c1, c2 = normalize_color(color1), normalize_color(color2)
     if c1 == c2:
         return 0.6
-
     compatible = get_compatible_colors(c1)
     if c2 in compatible:
         if c1 in NEUTRALS and c2 in NEUTRALS:
@@ -226,12 +237,10 @@ def _score_color_pair(color1: str, color2: str) -> float:
         if c1 in NEUTRALS or c2 in NEUTRALS:
             return 1.0
         return 0.8
-
     return 0.1
 
 
 def _occasion_bonus(item: CartItem, occasion_tags: list[str]) -> float:
-    """Thưởng 0.5 điểm nếu đồ có tag khớp occasion."""
     if not item.occasions:
         return 0.0
     for tag in occasion_tags:
@@ -240,19 +249,23 @@ def _occasion_bonus(item: CartItem, occasion_tags: list[str]) -> float:
     return 0.0
 
 
-def _best_match_item(
-    top: CartItem,
-    bottom: CartItem,
-    candidates: list[CartItem],
-    occasion_filter: list[str] | None,
-) -> CartItem | None:
-    """Tìm giày/phụ kiện phù hợp nhất với cả áo lẫn quần."""
-    best, best_score = None, -1
+def _attach_optional(outfit, anchors, candidates, occasion_filter, weight):
+    if not candidates:
+        return
+    best = _best_match_item(anchors, candidates, occasion_filter)
+    if best is None:
+        return
+    outfit["items"].append(best)
+    avg = sum(_score_color_pair(a.color, best.color) for a in anchors) / len(anchors)
+    outfit["score"] += avg * weight
+    if occasion_filter:
+        outfit["score"] += _occasion_bonus(best, occasion_filter) * weight
+
+
+def _best_match_item(anchors, candidates, occasion_filter):
+    best, best_score = None, -1.0
     for c in candidates:
-        score = (
-            _score_color_pair(top.color, c.color)
-            + _score_color_pair(bottom.color, c.color)
-        )
+        score = sum(_score_color_pair(a.color, c.color) for a in anchors) / len(anchors)
         if occasion_filter:
             score += _occasion_bonus(c, occasion_filter)
         if score > best_score:
@@ -261,175 +274,53 @@ def _best_match_item(
 
 
 def _pick_diverse(scored: list, max_n: int) -> list:
-    """Chọn bộ đa dạng — mỗi áo/quần chỉ xuất hiện 1 lần."""
     sorted_outfits = sorted(scored, key=lambda x: x["score"], reverse=True)
-    selected       = []
-    used_tops      = set()
-    used_bottoms   = set()
-
-    # Vòng 1: strict
+    selected, used_ids = [], set()
     for outfit in sorted_outfits:
         if len(selected) >= max_n:
             break
-        top_id    = outfit["items"][0].product_id
-        bottom_id = outfit["items"][1].product_id
-        if top_id not in used_tops and bottom_id not in used_bottoms:
+        if not any(bid in used_ids for bid in outfit["base_ids"]):
             selected.append(outfit)
-            used_tops.add(top_id)
-            used_bottoms.add(bottom_id)
-
-    # Vòng 2: nới lỏng nếu chưa đủ
+            used_ids.update(outfit["base_ids"])
     if len(selected) < max_n:
         for outfit in sorted_outfits:
             if outfit not in selected:
                 selected.append(outfit)
             if len(selected) >= max_n:
                 break
-
     return selected
 
 
 # ═════════════════════════════════════════════════════
-# WARDROBE QUERY
+# FORMAT
 # ═════════════════════════════════════════════════════
 
-def _get_wardrobe_items(user_id: str, db: Session) -> list[CartItem]:
-    """Lấy đồ trong tủ, join product để có color/category/occasions."""
-    rows = db.query(WardrobeItem).filter(
-        WardrobeItem.user_id == user_id,
-        WardrobeItem.status.in_(ACTIVE_WARDROBE_STATUSES),
-    ).all()
-
-    print(f"Total rows found: {len(rows)}")
-
-    result = []
-    for item in rows:
-        product = None
-        if item.product_id:
-            product = db.query(Product).filter(Product.id == item.product_id).first()
-
-        color     = normalize_color((product.color if product and product.color else None) or "black")
-        category  = item.category_name or (product.category if product else None) or "top"
-        name      = item.name or (product.title if product else "Không tên")
-        occasions = (product.ai_tags if product and product.ai_tags else [])
-
-        print(f"id={item.id}, category={category}, status={item.status}, user_id={item.user_id}")
-
-        result.append(CartItem(
-            product_id=str(item.id),
-            product_name=name,
-            color=color,
-            category=category,
-            occasions=occasions,
-        ))
-    return result
-
-
-def _group_by_category(items: list[CartItem]) -> dict:
-    groups = {"top": [], "bottom": [], "shoes": [], "accessory": []}
-    for item in items:
-        cat = (item.category or "top").lower()
-        if cat in groups:
-            groups[cat].append(item)
-    return groups
-
-
-def _check_groups(groups: dict) -> tuple[bool, str]:
-    tops    = groups["top"]
-    bottoms = groups["bottom"]
-    if not tops or not bottoms:
-        return False, f"Cần ít nhất 1 áo và 1 quần. Hiện có: {len(tops)} áo, {len(bottoms)} quần."
-    return True, ""
-
-
-# ═════════════════════════════════════════════════════
-# FORMAT + PARSE
-# ═════════════════════════════════════════════════════
-
-def _format_outfits(best: list) -> list:
-    outfits = []
-    for i, outfit in enumerate(best):
-        items_info = [
-            {
-                "product_id": item.product_id,
-                "name":       item.product_name,
-                "category":   item.category,
-                "color":      item.color,
-                "occasions":  item.occasions,
-            }
-            for item in outfit["items"]
-        ]
-        outfits.append({
-            "outfit_number": i + 1,
-            "score":         round(outfit["score"], 2),
-            "items":         items_info,
-            "description":   _describe(items_info),
-            "color_reason":  _color_reason(outfit["items"]),
-        })
-    return outfits
-
-
-def _parse_occasion_from_message(message: str) -> list[str]:
-    """
-    Tìm occasion trong câu nhắn.
-    Ví dụ:
-      "lựa cho tôi bộ đi đám cưới" → ["wedding", "formal"]
-      "muốn mặc đi làm"            → ["office"]
-    """
-    msg = message.lower().strip()
-
-    if msg in OCCASION_MAP:
-        return OCCASION_MAP[msg]
-
-    for key, tags in OCCASION_MAP.items():
-        if key in msg:
-            return tags
-
-    return ["casual"]
-
-
-def _occasion_display_name(message: str) -> str:
-    """Lấy tên dịp hiển thị từ message."""
-    msg = message.lower()
-    display_map = {
-        "đám cưới":  "đám cưới",
-        "wedding":   "đám cưới",
-        "đi làm":    "đi làm",
-        "office":    "đi làm",
-        "văn phòng": "đi làm",
-        "đi biển":   "đi biển",
-        "biển":      "đi biển",
-        "beach":     "đi biển",
-        "tiệc":      "tiệc",
-        "party":     "tiệc",
-        "hẹn hò":    "hẹn hò",
-        "date":      "hẹn hò",
-        "thể thao":  "thể thao",
-        "gym":       "thể thao",
-        "dã ngoại":  "dã ngoại",
-        "đi chơi":   "đi chơi",
-        "dạo phố":   "dạo phố",
-        "casual":    "dạo phố",
+def _item_info(item: CartItem, selected: bool) -> dict:
+    return {
+        "product_id": item.product_id,
+        "name": item.product_name,
+        "category": item.category,
+        "color": item.color,
+        "occasions": item.occasions,
+        "selected_by_user": selected,
     }
-    for key, display in display_map.items():
-        if key in msg:
-            return display
-    return "dịp thường ngày"
+
+
+async def _format_outfits(best: list, occasion_display: str | None = None) -> list:
+    async def _build_one(i: int, outfit: dict) -> dict:
+        items_info = [_item_info(item, selected=False) for item in outfit["items"]]
+        color_reason = await ai_service.generate_color_reason(items_info, occasion_display)
+        return {
+            "outfit_number": i + 1,
+            "score": round(outfit["score"], 2),
+            "items": items_info,
+            "description": _describe(items_info),
+            "color_reason": color_reason,
+        }
+
+    tasks = [_build_one(i, outfit) for i, outfit in enumerate(best)]
+    return list(await asyncio.gather(*tasks))
 
 
 def _describe(items: list[dict]) -> str:
     return " + ".join(f"{i['name']} ({i['color']})" for i in items)
-
-
-def _color_reason(items: list[CartItem]) -> str:
-    if len(items) < 2:
-        return ""
-    c1 = normalize_color(items[0].color)
-    c2 = normalize_color(items[1].color)
-    if c1 in NEUTRALS and c2 in NEUTRALS:
-        return f"Cả {c1} và {c2} đều là màu trung tính — bộ đôi kinh điển."
-    if c1 in NEUTRALS:
-        return f"Màu {c1} trung tính dễ phối với {c2}."
-    if c2 in NEUTRALS:
-        return f"Màu {c2} trung tính làm dịu màu {c1} nổi bật."
-    return f"Màu {c1} và {c2} phối hợp hài hòa."

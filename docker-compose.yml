@@ -1,6 +1,13 @@
 version: "3.9"
 
 services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    volumes:
+      - ollama_data:/root/.ollama
+    restart: unless-stopped
+
   api:
     build: ./backend
     env_file:
@@ -11,6 +18,10 @@ services:
       - ./backend:/app
     environment:
       - GOOGLE_APPLICATION_CREDENTIALS=/app/credentials.json
+      - OLLAMA_HOST=http://ollama:11434
     command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+    depends_on:
+      - ollama
+
+volumes:
+  ollama_data:
