@@ -8,7 +8,7 @@ services:
     volumes:
       - ./backend:/app
     environment:
-      - DATABASE_URL=postgresql://neondb_owner:npg_1HgrXSj8mTGC@ep-lingering-recipe-aixyu1zb-pooler.c-4.us-east-1.aws.neon.tech/neondb?sslmode=require
+      - DATABASE_URL=${DATABASE_URL}
       - GEMINI_API_KEY=${GEMINI_API_KEY}
       - GOOGLE_CLOUD_PROJECT=${GOOGLE_CLOUD_PROJECT}
       - GOOGLE_APPLICATION_CREDENTIALS=/app/credentials.json
